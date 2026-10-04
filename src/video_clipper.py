@@ -301,3 +301,75 @@ def create_clips(
         clip_paths.append(clip_path)
 
     return clip_paths
+
+
+def _extract_audio_ffmpeg(
+    input_path: str,
+    start_sec: int,
+    end_sec: int,
+    output_path: str,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-nostdin",
+        "-ss", str(start_sec),
+        "-to", str(end_sec),
+        "-i", input_path,
+        "-vn",
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",
+        output_path,
+    ]
+    result = _run_ffmpeg(cmd, cancel_event)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed extracting audio {start_sec}–{end_sec}s:\n{result.stderr}"
+        )
+
+
+def create_audio_clips(
+    input_path: str,
+    pairs: List[Tuple[int, int]],
+    output_dir: str,
+    cancel_event: Optional[threading.Event] = None,
+    status_callback=None,
+) -> List[str]:
+    """
+    Extract the audio of each (start, end) pair from the input video as MP3.
+
+    Requires ffmpeg; when the Python fallback is in use a warning is printed
+    and nothing is extracted.
+
+    Args:
+        input_path: Source video path (.mp4 or .mkv).
+        pairs: List of (start_sec, end_sec) tuples.
+        output_dir: Directory to save the audio files (created if missing).
+        cancel_event: Checked between files (and inside each ffmpeg call);
+            raises RuntimeError("__cancelled__") when set.
+        status_callback: Optional callable(str) invoked with a human-readable
+            "Extracting audio i/n" message before each file.
+
+    Returns:
+        Ordered list of audio file paths (empty if ffmpeg is unavailable).
+    """
+    if _use_python_clipper():
+        print("  [warning] Audio extraction requires ffmpeg — skipping")
+        return []
+
+    os.makedirs(output_dir, exist_ok=True)
+    audio_paths = []
+    total = len(pairs)
+
+    for i, (start, end) in enumerate(pairs, start=1):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__cancelled__")
+        audio_path = os.path.join(output_dir, f"match_{i:03d}.mp3")
+        print(f"  Extracting audio {i}: {start}s → {end}s → {audio_path}")
+        if status_callback is not None:
+            status_callback(f"Extracting audio {i}/{total}...")
+        _extract_audio_ffmpeg(input_path, start, end, audio_path, cancel_event)
+        audio_paths.append(audio_path)
+
+    return audio_paths

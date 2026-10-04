@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 import video_clipper
-from video_clipper import create_clips, extract_clip, stitch_clips
+from video_clipper import create_audio_clips, create_clips, extract_clip, stitch_clips
 
 # Capture the real function before any monkeypatching by fixtures.
 _real_use_python_clipper = video_clipper._use_python_clipper
@@ -185,6 +185,58 @@ class TestCreateClips:
             with tempfile.TemporaryDirectory() as tmpdir:
                 result = create_clips("in.mp4", [(0, 10)], tmpdir)
         assert os.path.dirname(result[0]) == tmpdir
+
+
+class TestCreateAudioClips:
+    def test_ffmpeg_command_extracts_mp3_audio(self):
+        with patch("subprocess.run", return_value=_ok()) as mock_run:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                create_audio_clips("in.mkv", [(5, 25)], tmpdir)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "ffmpeg"
+        assert cmd[cmd.index("-ss") + 1] == "5"
+        assert cmd[cmd.index("-to") + 1] == "25"
+        assert cmd[cmd.index("-i") + 1] == "in.mkv"
+        assert "-vn" in cmd
+        assert cmd[cmd.index("-c:a") + 1] == "libmp3lame"
+        assert cmd[-1].endswith(".mp3")
+
+    def test_files_are_sequentially_numbered_in_output_dir(self):
+        with patch("subprocess.run", return_value=_ok()):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = create_audio_clips("in.mp4", [(0, 10), (20, 30)], tmpdir)
+        assert [os.path.basename(p) for p in result] == ["match_001.mp3", "match_002.mp3"]
+        assert all(os.path.dirname(p) == tmpdir for p in result)
+
+    def test_creates_output_directory(self):
+        with patch("subprocess.run", return_value=_ok()):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                new_dir = os.path.join(tmpdir, "my_video")
+                create_audio_clips("in.mp4", [(0, 10)], new_dir)
+                assert os.path.isdir(new_dir)
+
+    def test_ffmpeg_failure_raises_runtime_error(self):
+        with patch("subprocess.run", return_value=_fail("bad audio")):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with pytest.raises(RuntimeError, match="extracting audio"):
+                    create_audio_clips("in.mp4", [(0, 10)], tmpdir)
+
+    def test_skipped_without_ffmpeg(self, monkeypatch):
+        monkeypatch.setattr(video_clipper, "_use_python_clipper", lambda: True)
+        with patch("subprocess.run") as mock_run:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                new_dir = os.path.join(tmpdir, "my_video")
+                result = create_audio_clips("in.mp4", [(0, 10)], new_dir)
+                assert not os.path.exists(new_dir)
+        assert result == []
+        mock_run.assert_not_called()
+
+    def test_cancel_event_set_raises_cancelled(self):
+        ev = threading.Event()
+        ev.set()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(RuntimeError, match="__cancelled__"):
+                create_audio_clips("in.mp4", [(0, 10)], tmpdir, cancel_event=ev)
 
 
 # ---------------------------------------------------------------------------

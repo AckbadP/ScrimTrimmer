@@ -70,6 +70,7 @@ _DEFAULTS = {
     "buffer_end": 0,  # seconds added to each clip's end (negative = earlier), normal mode
     "tournament_buffer_start": 0,  # same, tournament mode
     "tournament_buffer_end": 10,  # same, tournament mode (matches prior hardcoded +10s tail)
+    "extract_audio": False,  # also save each clip's audio as MP3 in <output_dir>/<video name>/
     "window_geometry": "",  # last window geometry string, e.g. "900x700+100+50"
 }
 

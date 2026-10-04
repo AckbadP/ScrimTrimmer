@@ -27,7 +27,7 @@ from chat_analyzer import analyze_frames, pair_cd_wf
 from chat_log_parser import parse_chat_logs, game_time_to_seconds
 from log_matcher import detect_t0
 import video_clipper
-from video_clipper import create_clips, stitch_clips
+from video_clipper import create_audio_clips, create_clips, stitch_clips
 
 
 class CancelledError(Exception):
@@ -291,6 +291,15 @@ def parse_args():
         help="Seconds added to each clip's end in tournament mode (negative = earlier; default: 10)",
     )
     parser.add_argument(
+        "--extract-audio",
+        action="store_true",
+        dest="extract_audio",
+        help=(
+            "Also save each clip's audio as an MP3 in a folder named after the "
+            "input video, inside the output directory (requires ffmpeg)"
+        ),
+    )
+    parser.add_argument(
         "--no-detect-countdown",
         action="store_false",
         dest="detect_countdown",
@@ -372,6 +381,36 @@ def output_video_path(args, output_dir: str) -> str:
     title = (getattr(args, "youtube_title", "") or "").strip()
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")
     return os.path.join(output_dir, f"{name or 'final_output'}.mp4")
+
+
+def audio_output_dir(args, output_dir: str) -> str:
+    """Per-clip audio folder: <output_dir>/<input video filename without extension>."""
+    return os.path.join(output_dir, os.path.splitext(os.path.basename(args.video))[0])
+
+
+def _maybe_extract_audio(args, pairs: List[Tuple[int, int]], output_dir: str, notify) -> None:
+    """Extract each clip's audio to its own MP3 if enabled in args."""
+    if not getattr(args, "extract_audio", False):
+        return
+    audio_dir = audio_output_dir(args, output_dir)
+    _check_cancel(args)
+    notify("Extracting audio...")
+    print(f"\nExtracting audio for {len(pairs)} clip(s) into {audio_dir}...")
+    # Audio is an optional extra: a failure here (e.g. a source video with no
+    # audio track) must not lose the already-stitched video and chapters.
+    try:
+        create_audio_clips(
+            args.video, pairs, audio_dir,
+            cancel_event=getattr(args, "cancel_event", None),
+            status_callback=notify,
+        )
+    except RuntimeError as e:
+        if str(e) == "__cancelled__":
+            raise
+        notify("Audio extraction failed — see log")
+        print(f"  Warning: audio extraction failed: {e}", file=sys.stderr)
+        if os.path.isdir(audio_dir) and not os.listdir(audio_dir):
+            os.rmdir(audio_dir)
 
 
 def _maybe_upload(
@@ -530,6 +569,7 @@ def run(args) -> None:
             _notify("Stitching clips...")
             print(f"\n[3/4] Stitching clips into {final_output}...")
             stitch_clips(clip_paths, final_output, cancel_event=getattr(args, "cancel_event", None))
+            _maybe_extract_audio(args, pairs, output_dir, _notify)
         except RuntimeError as e:
             if str(e) == "__cancelled__":
                 raise CancelledError("Cancelled by user")
@@ -685,6 +725,7 @@ def run(args) -> None:
         _notify("Stitching clips...")
         print(f"\n[4/4] Stitching clips into {final_output}...")
         stitch_clips(clip_paths, final_output, cancel_event=getattr(args, "cancel_event", None))
+        _maybe_extract_audio(args, pairs, output_dir, _notify)
     except RuntimeError as e:
         if str(e) == "__cancelled__":
             raise CancelledError("Cancelled by user")

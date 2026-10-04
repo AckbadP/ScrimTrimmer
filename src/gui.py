@@ -130,6 +130,8 @@ class App(TkinterDnD.Tk):
         self.tournament_buffer_start_var.trace_add("write", self._save_config)
         self.tournament_buffer_end_var = tk.IntVar(value=_conf.get("tournament_buffer_end", 10))
         self.tournament_buffer_end_var.trace_add("write", self._save_config)
+        self.extract_audio_var = tk.BooleanVar(value=bool(_conf.get("extract_audio", False)))
+        self.extract_audio_var.trace_add("write", self._save_config)
         self.youtube_upload_var = tk.BooleanVar(value=bool(_conf.get("youtube_upload", False)))
         self.youtube_upload_var.trace_add("write", self._save_config)
         self.youtube_title_var = tk.StringVar(value=cfg.default_youtube_title())
@@ -397,31 +399,41 @@ class App(TkinterDnD.Tk):
                   foreground="#888", font=("TkDefaultFont", 8)).grid(
             row=10, column=0, columnspan=2, sticky=tk.W, pady=(0, 4), padx=(0, 8))
 
+        # per-clip audio extraction
+        ttk.Label(adv_tab, text="Extract match audio").grid(
+            row=11, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+        ttk.Checkbutton(adv_tab, variable=self.extract_audio_var).grid(
+            row=11, column=1, sticky=tk.W, pady=2)
+        ttk.Label(adv_tab, text="Save each match's audio as an MP3 in a folder named after the\n"
+                                "video, inside the output directory. Requires ffmpeg.",
+                  foreground="#888", font=("TkDefaultFont", 8)).grid(
+            row=12, column=0, columnspan=2, sticky=tk.W, pady=(0, 4), padx=(0, 8))
+
         # chapter timestamps popup
         ttk.Label(adv_tab, text="Show timestamps popup").grid(
-            row=11, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=13, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.show_chapters_popup_var).grid(
-            row=11, column=1, sticky=tk.W, pady=2)
+            row=13, column=1, sticky=tk.W, pady=2)
 
         # close on complete
         ttk.Label(adv_tab, text="Close when done").grid(
-            row=12, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=14, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.close_on_complete_var).grid(
-            row=12, column=1, sticky=tk.W, pady=2)
+            row=14, column=1, sticky=tk.W, pady=2)
 
         # debug output popup
         ttk.Label(adv_tab, text="Show debug output").grid(
-            row=13, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=15, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.show_debug_popup_var).grid(
-            row=13, column=1, sticky=tk.W, pady=2)
+            row=15, column=1, sticky=tk.W, pady=2)
 
         # YouTube upload
         ttk.Separator(adv_tab, orient=tk.HORIZONTAL).grid(
-            row=14, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
+            row=16, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
         ttk.Label(adv_tab, text="Upload to YouTube").grid(
-            row=15, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=17, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.youtube_upload_var).grid(
-            row=15, column=1, sticky=tk.W, pady=2)
+            row=17, column=1, sticky=tk.W, pady=2)
 
         _last_nb_content_height = [None]
 
@@ -815,6 +827,7 @@ class App(TkinterDnD.Tk):
             buffer_end=self._safe_int(self.buffer_end_var, 0),
             tournament_buffer_start=self._safe_int(self.tournament_buffer_start_var, 0),
             tournament_buffer_end=self._safe_int(self.tournament_buffer_end_var, 10),
+            extract_audio=bool(self.extract_audio_var.get()),
         )
 
         self._launch_worker(args)
@@ -1243,6 +1256,7 @@ class App(TkinterDnD.Tk):
             "buffer_end": self._safe_int(self.buffer_end_var, 0),
             "tournament_buffer_start": self._safe_int(self.tournament_buffer_start_var, 0),
             "tournament_buffer_end": self._safe_int(self.tournament_buffer_end_var, 10),
+            "extract_audio": bool(self.extract_audio_var.get()),
             "window_geometry": self.winfo_geometry(),
         })
 
