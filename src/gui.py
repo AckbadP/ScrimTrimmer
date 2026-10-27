@@ -60,6 +60,7 @@ except ImportError as e:
 from frame_extractor import get_video_duration, is_growing
 import main as pipeline
 import native_dialogs
+from video_clipper import DEFAULT_LABEL_POS, LABEL_FONT_FRAC
 
 
 VALID_EXTENSIONS = {".mp4", ".mkv"}
@@ -94,6 +95,8 @@ class App(TkinterDnD.Tk):
         self._canvas_img_id = None
         self._canvas_rect_id = None
         self._drag_start = None
+        self._label_text_id = None
+        self._label_box_id = None
         # Letterboxed image rect within the canvas: (x_offset, y_offset, width, height)
         self._img_rect: tuple[int, int, int, int] | None = None
 
@@ -106,6 +109,10 @@ class App(TkinterDnD.Tk):
 
         raw = _conf.get("chat_region", _DEFAULT_REGION)
         self._chat_region: list[float] = list(raw) if len(raw) == 4 else list(_DEFAULT_REGION)
+        raw_pos = _conf.get("match_label_pos", list(DEFAULT_LABEL_POS))
+        self._match_label_pos: list[float] = (
+            list(raw_pos) if len(raw_pos) == 2 else list(DEFAULT_LABEL_POS)
+        )
 
         # Auto-save config whenever any default directory changes
         self.default_video_dir_var.trace_add("write", self._save_config)
@@ -133,6 +140,12 @@ class App(TkinterDnD.Tk):
         self.youtube_upload_var = tk.BooleanVar(value=bool(_conf.get("youtube_upload", False)))
         self.youtube_upload_var.trace_add("write", self._save_config)
         self.youtube_title_var = tk.StringVar(value=cfg.default_youtube_title())
+        self.match_label_var = tk.BooleanVar(value=bool(_conf.get("match_label", False)))
+        self.match_label_var.trace_add("write", self._save_config)
+        self.raw_mode_var = tk.BooleanVar(value=bool(_conf.get("raw_mode", False)))
+        self.raw_mode_var.trace_add("write", self._save_config)
+        # Which overlay a drag on the preview edits: "region" or "label".
+        self.drag_mode_var = tk.StringVar(value="region")
 
         self._build_ui()
 
@@ -205,12 +218,17 @@ class App(TkinterDnD.Tk):
         self._cv_hscroll.config(command=self.thumb_canvas.xview)
         self._cv_vscroll_preview.config(command=self.thumb_canvas.yview)
 
-        ttk.Label(
-            canvas_col,
-            text="Drag to select chat region",
-            font=("TkDefaultFont", 8),
-            foreground="#888",
-        ).pack(pady=(2, 0))
+        mode_frame = ttk.Frame(canvas_col)
+        mode_frame.pack(pady=(2, 0))
+        ttk.Label(mode_frame, text="Drag sets:", font=("TkDefaultFont", 8),
+                  foreground="#888").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Radiobutton(mode_frame, text="Chat region", value="region",
+                        variable=self.drag_mode_var).pack(side=tk.LEFT)
+        self._label_mode_radio = ttk.Radiobutton(
+            mode_frame, text="Match label position", value="label",
+            variable=self.drag_mode_var,
+        )
+        self._label_mode_radio.pack(side=tk.LEFT, padx=(6, 0))
 
         self.thumb_canvas.bind("<ButtonPress-1>", self._on_region_press)
         self.thumb_canvas.bind("<B1-Motion>", self._on_region_drag)
@@ -270,16 +288,27 @@ class App(TkinterDnD.Tk):
         ttk.Label(main_tab, text="Tournament Match?").grid(row=2, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(main_tab, variable=self.tournament_match_var).grid(row=2, column=1, sticky=tk.W, pady=2)
 
+        # match label overlay toggle
+        ttk.Label(main_tab, text="Show Match label?").grid(row=3, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+        ttk.Checkbutton(main_tab, variable=self.match_label_var,
+                        command=self._on_match_label_toggle).grid(row=3, column=1, sticky=tk.W, pady=2)
+        ttk.Label(main_tab, text="Burns the chapter name ('Match 1', ...) into each clip. Position it on the\n"
+                                 "preview with 'Match label position'. Re-encodes video, so runs slower.",
+                  foreground="#888", font=("TkDefaultFont", 8)).grid(
+            row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+
         # video title
-        ttk.Label(main_tab, text="Youtube Video Title").grid(row=3, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+        ttk.Label(main_tab, text="Youtube Video Title").grid(row=5, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         yt_title_frame = ttk.Frame(main_tab)
-        yt_title_frame.grid(row=3, column=1, sticky=tk.EW, pady=2)
+        yt_title_frame.grid(row=5, column=1, sticky=tk.EW, pady=2)
         yt_title_frame.columnconfigure(0, weight=1)
         self._yt_title_entry = ttk.Entry(yt_title_frame, textvariable=self.youtube_title_var)
         self._yt_title_entry.grid(row=0, column=0, sticky=tk.EW)
         ttk.Label(main_tab, text="Defaults to today's date (UTC). Leave blank to use the video filename.",
                   foreground="#888", font=("TkDefaultFont", 8)).grid(
-            row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+            row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+
+        self._on_match_label_toggle()
 
         # --- Advanced tab ---
         adv_tab = ttk.Frame(notebook, padding=(4, 6))
@@ -397,31 +426,41 @@ class App(TkinterDnD.Tk):
                   foreground="#888", font=("TkDefaultFont", 8)).grid(
             row=10, column=0, columnspan=2, sticky=tk.W, pady=(0, 4), padx=(0, 8))
 
+        # raw mode
+        ttk.Label(adv_tab, text="Raw mode (don't cut video)").grid(
+            row=11, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+        ttk.Checkbutton(adv_tab, variable=self.raw_mode_var).grid(
+            row=11, column=1, sticky=tk.W, pady=2)
+        ttk.Label(adv_tab, text="Detects matches but uploads the full uncut video with chapter\n"
+                                "timestamps for each match. Match label is ignored.",
+                  foreground="#888", font=("TkDefaultFont", 8)).grid(
+            row=12, column=0, columnspan=2, sticky=tk.W, pady=(0, 4), padx=(0, 8))
+
         # chapter timestamps popup
         ttk.Label(adv_tab, text="Show timestamps popup").grid(
-            row=11, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=13, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.show_chapters_popup_var).grid(
-            row=11, column=1, sticky=tk.W, pady=2)
+            row=13, column=1, sticky=tk.W, pady=2)
 
         # close on complete
         ttk.Label(adv_tab, text="Close when done").grid(
-            row=12, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=14, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.close_on_complete_var).grid(
-            row=12, column=1, sticky=tk.W, pady=2)
+            row=14, column=1, sticky=tk.W, pady=2)
 
         # debug output popup
         ttk.Label(adv_tab, text="Show debug output").grid(
-            row=13, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=15, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.show_debug_popup_var).grid(
-            row=13, column=1, sticky=tk.W, pady=2)
+            row=15, column=1, sticky=tk.W, pady=2)
 
         # YouTube upload
         ttk.Separator(adv_tab, orient=tk.HORIZONTAL).grid(
-            row=14, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
+            row=16, column=0, columnspan=2, sticky=tk.EW, pady=(8, 4))
         ttk.Label(adv_tab, text="Upload to YouTube").grid(
-            row=15, column=0, sticky=tk.W, pady=2, padx=(0, 8))
+            row=17, column=0, sticky=tk.W, pady=2, padx=(0, 8))
         ttk.Checkbutton(adv_tab, variable=self.youtube_upload_var).grid(
-            row=15, column=1, sticky=tk.W, pady=2)
+            row=17, column=1, sticky=tk.W, pady=2)
 
         _last_nb_content_height = [None]
 
@@ -578,6 +617,8 @@ class App(TkinterDnD.Tk):
             self.thumb_canvas.delete("all")
             self._canvas_img_id = None
             self._canvas_rect_id = None
+            self._label_text_id = None
+            self._label_box_id = None
             self.thumb_canvas.create_text(
                 THUMB_W // 2, THUMB_H // 2, text="(no preview)", fill="white"
             )
@@ -675,6 +716,7 @@ class App(TkinterDnD.Tk):
             self.thumb_canvas.coords(self._canvas_img_id, ox, oy)
         self.thumb_canvas.configure(scrollregion=(0, 0, max(cw, ox + dw), max(ch, oy + dh)))
         self._draw_region_rect()
+        self._draw_label_preview()
 
     def _on_canvas_resize(self, event):
         self._redraw_canvas()
@@ -695,7 +737,69 @@ class App(TkinterDnD.Tk):
             self.thumb_canvas.coords(self._canvas_rect_id, cx1, cy1, cx2, cy2)
         self.thumb_canvas.tag_raise(self._canvas_rect_id)
 
+    def _draw_label_preview(self):
+        """Draw/update the sample match label at its position, or hide it when off."""
+        if self._img_rect is None or not self.match_label_var.get():
+            for item in (self._label_box_id, self._label_text_id):
+                if item is not None:
+                    self.thumb_canvas.delete(item)
+            self._label_box_id = self._label_text_id = None
+            return
+        ox, oy, dw, dh = self._img_rect
+        # Negative size = pixels; same height fraction as the rendered label.
+        font = ("Helvetica", -max(6, int(dh * LABEL_FONT_FRAC)))
+        if self._label_text_id is None:
+            self._label_box_id = self.thumb_canvas.create_rectangle(
+                0, 0, 0, 0, fill="black", outline="", stipple="gray50"
+            )
+            self._label_text_id = self.thumb_canvas.create_text(
+                0, 0, text=pipeline.chapter_titles(1)[0], fill="white", anchor="center"
+            )
+        self.thumb_canvas.itemconfig(self._label_text_id, font=font)
+        # Center, then clamp the text inside the image like the ffmpeg filter does.
+        self.thumb_canvas.coords(self._label_text_id, 0, 0)
+        tx1, ty1, tx2, ty2 = self.thumb_canvas.bbox(self._label_text_id)
+        tw, th = tx2 - tx1, ty2 - ty1
+        pad = max(1, int(8 * dh / 1080))
+        fx, fy = self._match_label_pos
+        cx = min(max(ox + fx * dw, ox + pad + tw / 2), ox + dw - pad - tw / 2)
+        cy = min(max(oy + fy * dh, oy + pad + th / 2), oy + dh - pad - th / 2)
+        self.thumb_canvas.coords(self._label_text_id, cx, cy)
+        self.thumb_canvas.coords(
+            self._label_box_id,
+            cx - tw / 2 - pad, cy - th / 2 - pad, cx + tw / 2 + pad, cy + th / 2 + pad,
+        )
+        self.thumb_canvas.tag_raise(self._label_box_id)
+        self.thumb_canvas.tag_raise(self._label_text_id)
+
+    def _on_match_label_toggle(self):
+        if self.match_label_var.get():
+            self._label_mode_radio.configure(state="normal")
+        else:
+            self._label_mode_radio.configure(state="disabled")
+            self.drag_mode_var.set("region")
+        self._draw_label_preview()
+
+    def _move_label_to(self, event):
+        """Set the label center from a canvas event position (clamped to the image)."""
+        if self._img_rect is None:
+            return
+        ox, oy, dw, dh = self._img_rect
+        cx = self.thumb_canvas.canvasx(event.x)
+        cy = self.thumb_canvas.canvasy(event.y)
+        self._match_label_pos = [
+            max(0.0, min(1.0, (cx - ox) / dw)),
+            max(0.0, min(1.0, (cy - oy) / dh)),
+        ]
+        self._draw_label_preview()
+
+    def _label_mode(self) -> bool:
+        return self.drag_mode_var.get() == "label" and bool(self.match_label_var.get())
+
     def _on_region_press(self, event):
+        if self._label_mode():
+            self._move_label_to(event)
+            return
         cx = self.thumb_canvas.canvasx(event.x)
         cy = self.thumb_canvas.canvasy(event.y)
         self._drag_start = (cx, cy)
@@ -711,6 +815,9 @@ class App(TkinterDnD.Tk):
         self.thumb_canvas.tag_raise(self._canvas_rect_id)
 
     def _on_region_drag(self, event):
+        if self._label_mode():
+            self._move_label_to(event)
+            return
         if self._drag_start is None or self._canvas_rect_id is None:
             return
         x0, y0 = self._drag_start
@@ -723,6 +830,10 @@ class App(TkinterDnD.Tk):
         )
 
     def _on_region_release(self, event):
+        if self._label_mode():
+            self._move_label_to(event)
+            self._save_config()
+            return
         if self._drag_start is None:
             return
         x0, y0 = self._drag_start
@@ -815,6 +926,9 @@ class App(TkinterDnD.Tk):
             buffer_end=self._safe_int(self.buffer_end_var, 0),
             tournament_buffer_start=self._safe_int(self.tournament_buffer_start_var, 0),
             tournament_buffer_end=self._safe_int(self.tournament_buffer_end_var, 10),
+            match_label=bool(self.match_label_var.get()),
+            match_label_pos=list(self._match_label_pos),
+            raw_mode=bool(self.raw_mode_var.get()),
         )
 
         self._launch_worker(args)
@@ -895,7 +1009,10 @@ class App(TkinterDnD.Tk):
                 sys.stderr = stderr_capture
             try:
                 chapters_text, youtube_url = pipeline.run(args)
-                status_msg = f"Done! Output: {pipeline.output_video_path(args, args.output)}"
+                if getattr(args, "raw_mode", False):
+                    status_msg = "Done! Chapters written (source video not modified)"
+                else:
+                    status_msg = f"Done! Output: {pipeline.output_video_path(args, args.output)}"
                 if youtube_url:
                     status_msg += f"  |  YouTube: {youtube_url}"
                 self.after(0, lambda m=status_msg: self._set_status(m))
@@ -946,6 +1063,8 @@ class App(TkinterDnD.Tk):
         self.thumb_canvas.delete("all")
         self._canvas_img_id = None
         self._canvas_rect_id = None
+        self._label_text_id = None
+        self._label_box_id = None
         self.info_label.configure(text="")
         default_out = os.path.expanduser(self.default_output_dir_var.get().strip())
         self.output_var.set(default_out if default_out else "out")
@@ -1243,6 +1362,9 @@ class App(TkinterDnD.Tk):
             "buffer_end": self._safe_int(self.buffer_end_var, 0),
             "tournament_buffer_start": self._safe_int(self.tournament_buffer_start_var, 0),
             "tournament_buffer_end": self._safe_int(self.tournament_buffer_end_var, 10),
+            "match_label": bool(self.match_label_var.get()),
+            "match_label_pos": self._match_label_pos,
+            "raw_mode": bool(self.raw_mode_var.get()),
             "window_geometry": self.winfo_geometry(),
         })
 

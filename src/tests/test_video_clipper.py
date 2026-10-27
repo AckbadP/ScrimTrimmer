@@ -425,3 +425,73 @@ class TestCancellation:
         assert elapsed < 10, "cancellation should abort well before the 30s sleep completes"
         time.sleep(0.2)
         assert created["proc"].poll() is not None, "child process must not be left running"
+
+
+# ---------------------------------------------------------------------------
+# Match label overlay
+# ---------------------------------------------------------------------------
+
+class TestMatchLabel:
+    def test_drawtext_filter_contents(self):
+        f = video_clipper._drawtext_filter("Match 3", (0.25, 0.75), 40)
+        assert f.startswith("drawtext=")
+        assert "text='Match 3'" in f
+        assert "fontsize=40" in f
+        assert "w*0.2500-text_w/2" in f
+        assert "h*0.7500-text_h/2" in f
+
+    def test_drawtext_filter_escapes_commas_in_expressions(self):
+        # Unescaped commas would split the -vf filtergraph.
+        f = video_clipper._drawtext_filter("Match 1", (0.5, 0.5), 40)
+        expr = f.split("x=", 1)[1]
+        assert "," not in expr.replace("\\,", "")
+
+    def test_label_reencodes_with_drawtext(self, monkeypatch):
+        monkeypatch.setattr(video_clipper, "_video_height", lambda _: 1080)
+        with patch("subprocess.run", return_value=_ok()) as mock_run:
+            extract_clip("in.mp4", 0, 10, "out.mp4", label="Match 1")
+        cmd = mock_run.call_args[0][0]
+        vf = cmd[cmd.index("-vf") + 1]
+        assert "text='Match 1'" in vf
+        assert "fontsize=54" in vf  # 1080 * LABEL_FONT_FRAC
+        assert cmd[cmd.index("-c:v") + 1] == "libx264"
+        assert cmd[cmd.index("-c:a") + 1] == "copy"
+        assert "-c" not in cmd
+
+    def test_no_label_keeps_stream_copy(self):
+        with patch("subprocess.run", return_value=_ok()) as mock_run:
+            extract_clip("in.mp4", 0, 10, "out.mp4")
+        cmd = mock_run.call_args[0][0]
+        assert "-vf" not in cmd
+        assert cmd[cmd.index("-c") + 1] == "copy"
+
+    def test_create_clips_forwards_labels_in_order(self):
+        with patch.object(video_clipper, "extract_clip") as mock_extract:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                create_clips("in.mp4", [(0, 10), (20, 30)], tmpdir,
+                             labels=["Match 1", "Match 2"], label_pos=(0.1, 0.9))
+        labels = [c.kwargs["label"] for c in mock_extract.call_args_list]
+        positions = {c.kwargs["label_pos"] for c in mock_extract.call_args_list}
+        assert labels == ["Match 1", "Match 2"]
+        assert positions == {(0.1, 0.9)}
+
+    def test_create_clips_without_labels_passes_none(self):
+        with patch.object(video_clipper, "extract_clip") as mock_extract:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                create_clips("in.mp4", [(0, 10)], tmpdir)
+        assert mock_extract.call_args.kwargs["label"] is None
+
+    def test_python_fallback_draws_label(self, monkeypatch):
+        import numpy as np
+        monkeypatch.setattr(video_clipper, "_use_python_clipper", lambda: True)
+        frame = np.zeros((200, 320, 3), dtype=np.uint8)
+        cap = MagicMock()
+        cap.get.side_effect = lambda prop: {0: 30.0, 3: 320, 4: 200}.get(prop, 0)
+        cap.read.side_effect = [(True, frame), (False, None)]
+        writer = MagicMock()
+        with patch("cv2.VideoCapture", return_value=cap), \
+             patch("cv2.VideoWriter", return_value=writer), \
+             patch("cv2.VideoWriter_fourcc", return_value=0):
+            extract_clip("in.mp4", 0, 1, "out.mp4", label="Match 1", label_pos=(0.5, 0.5))
+        written = writer.write.call_args[0][0]
+        assert written.max() == 255  # white label text drawn into the frame

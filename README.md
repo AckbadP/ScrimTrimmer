@@ -83,12 +83,17 @@ When a video is loaded, a thumbnail is shown. **Click and drag on the thumbnail 
 
 The thumbnail is resizable: drag the window edges to make it larger for more precise selection. The image maintains its original aspect ratio.
 
+### Match label
+
+When **Show Match label?** is enabled (Main tab), each clip gets its chapter name (`Match 1`, `Match 2`, ... — the same names as the YouTube chapters) burned into the video for the whole clip. A sample label appears on the thumbnail; select **Drag sets: Match label position** under the thumbnail, then click or drag on the thumbnail to place it. The position is saved automatically. Labelling requires re-encoding the video (libx264, audio is still copied), so runs are slower than the default stream-copy.
+
 ### Options — Main tab
 
 | Field | Description |
 |---|---|
 | **Output dir** | Directory where clips and `final_output.mp4` are written. |
 | **Chat log** | One or more EVE chat log `.txt` files (semicolon-separated). When provided, OCR is skipped and the log is used for CD/WF detection instead. |
+| **Show Match label?** | Off by default. Burn each clip's chapter name (`Match N`) into the video; position it on the thumbnail (see [Match label](#match-label)). |
 
 ### Options — Advanced tab
 
@@ -103,12 +108,15 @@ The thumbnail is resizable: drag the window edges to make it larger for more pre
 | **Force Python clipper** | off | Use the pure-Python ffmpeg wrapper instead of the native ffmpeg binary for clipping. Slower but useful for debugging. |
 | **Show timestamps popup** | on | After a successful run, open a popup window displaying YouTube chapter timestamps (see below). |
 | **Close when done** | off | Automatically close the application once processing completes. |
+| **Raw mode (don't cut video)** | off | Detect matches as usual but don't cut anything. The full source video is uploaded unchanged, with chapter timestamps marking each match in the original recording (see below). Match label is ignored. |
 | **Upload to YouTube** | off | Automatically upload `final_output.mp4` to YouTube as an unlisted video once processing finishes (see below). |
 | **Video title** | today's date (UTC, `MM-DD`) | Title for the uploaded YouTube video. Re-derived from the current date every time the app launches or is reset (not remembered between runs). Leave blank to use the video filename. |
 
 ### YouTube chapter timestamps
 
 After each successful run, the tool generates a list of YouTube chapter timestamps — one line per clip in `0:00 Match 1` format. If **Show timestamps popup** is enabled, a window opens showing the timestamps with a **Copy to Clipboard** button. If a **Chapters file dir** is configured, the timestamps are also written to a `.txt` file in that directory.
+
+In **Raw mode** the timestamps point into the uncut source video instead: `Match N` at each match start, plus `Pre-match`, `Break` and `Post-match` chapters for downtime of 10 seconds or more (YouTube's minimum chapter length). Shorter gaps fold into the neighbouring chapter.
 
 ### YouTube upload
 
@@ -137,6 +145,9 @@ python src/main.py <video.mp4>
 | `--buffer-end SECONDS` | `0` | Seconds added to each clip's end in normal mode (negative = earlier) |
 | `--tournament-buffer-start SECONDS` | `0` | Seconds added to each clip's start in `--tournament-match` mode (negative = earlier) |
 | `--tournament-buffer-end SECONDS` | `10` | Seconds added to each clip's end in `--tournament-match` mode (negative = earlier) |
+| `--match-label` | off | Burn each clip's chapter name (`Match N`) into the video. Re-encodes (slower) |
+| `--match-label-pos X Y` | `0.5 0.05` | Center of the match label as fractions of frame width/height (default: top center) |
+| `--raw` | off | Raw mode: detect matches but don't cut the video; chapters use source-video timestamps |
 | `--threads N` | CPU count | Number of parallel OCR worker threads |
 | `--ram-cap-gb GB` | `10` | Maximum GB of decoded frames held in memory at once; reduce if the process is killed by the OS |
 | `--chapters-dir DIR` | *(output dir)* | Directory to write the YouTube chapter timestamps `.txt` file |

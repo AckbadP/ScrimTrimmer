@@ -70,6 +70,9 @@ _DEFAULTS = {
     "buffer_end": 0,  # seconds added to each clip's end (negative = earlier), normal mode
     "tournament_buffer_start": 0,  # same, tournament mode
     "tournament_buffer_end": 10,  # same, tournament mode (matches prior hardcoded +10s tail)
+    "match_label": False,  # burn a "Match N" label (chapter name) into each clip
+    "match_label_pos": [0.5, 0.05],  # [x, y] label center as fractions
+    "raw_mode": False,  # don't cut; chapters mark matches in the uncut source video
     "window_geometry": "",  # last window geometry string, e.g. "900x700+100+50"
 }
 

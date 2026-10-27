@@ -136,6 +136,19 @@ class TestLoadConfig:
             result = cfg.load_config()
         assert result == dict(cfg._DEFAULTS)
 
+    def test_match_label_off_by_default(self):
+        nonexistent = Path(tempfile.mkdtemp()) / "nodir" / "config.json"
+        with patch.object(cfg, "CONFIG_PATH", nonexistent):
+            result = cfg.load_config()
+        assert result["match_label"] is False
+        assert result["match_label_pos"] == [0.5, 0.05]
+
+    def test_raw_mode_off_by_default(self):
+        nonexistent = Path(tempfile.mkdtemp()) / "nodir" / "config.json"
+        with patch.object(cfg, "CONFIG_PATH", nonexistent):
+            result = cfg.load_config()
+        assert result["raw_mode"] is False
+
     def test_file_values_override_defaults(self):
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False

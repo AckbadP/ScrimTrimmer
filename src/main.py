@@ -27,7 +27,7 @@ from chat_analyzer import analyze_frames, pair_cd_wf
 from chat_log_parser import parse_chat_logs, game_time_to_seconds
 from log_matcher import detect_t0
 import video_clipper
-from video_clipper import create_clips, stitch_clips
+from video_clipper import DEFAULT_LABEL_POS, create_clips, stitch_clips
 
 
 class CancelledError(Exception):
@@ -144,7 +144,9 @@ def _find_windows_tool(name: str) -> "str | None":
 
 def _check_dependencies(args) -> None:
     """Verify required external tools are available before starting a long job."""
-    if not getattr(args, "run_without_ffmpeg", False) and shutil.which("ffmpeg") is None:
+    # Raw mode never cuts the video, so ffmpeg isn't needed.
+    needs_ffmpeg = not (getattr(args, "run_without_ffmpeg", False) or getattr(args, "raw_mode", False))
+    if needs_ffmpeg and shutil.which("ffmpeg") is None:
         ffmpeg_dir = _find_windows_tool("ffmpeg")
         if ffmpeg_dir:
             os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
@@ -301,6 +303,36 @@ def parse_args():
             "the 'CD' announcement still get a clip start."
         ),
     )
+    parser.add_argument(
+        "--match-label",
+        action="store_true",
+        dest="match_label",
+        help=(
+            "Burn a 'Match N' label (same names as the YouTube chapters) into "
+            "each clip. Re-encodes the video, so it is slower than the default."
+        ),
+    )
+    parser.add_argument(
+        "--match-label-pos",
+        type=float,
+        nargs=2,
+        metavar=("X", "Y"),
+        default=list(DEFAULT_LABEL_POS),
+        dest="match_label_pos",
+        help=(
+            "Center of the match label as frame fractions "
+            f"(default: {DEFAULT_LABEL_POS[0]} {DEFAULT_LABEL_POS[1]} = top center)"
+        ),
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        dest="raw_mode",
+        help=(
+            "Detect matches but don't cut the video. Chapters use source-video "
+            "timestamps, and YouTube upload (GUI) sends the full source video."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -314,6 +346,19 @@ def _fmt_duration(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
+def chapter_titles(count: int) -> List[str]:
+    """Titles shared by the YouTube chapters and the on-video match labels."""
+    return [f"Match {i}" for i in range(1, count + 1)]
+
+
+def _label_kwargs(args, count: int) -> dict:
+    """create_clips() label kwargs when --match-label is on, else {}."""
+    if not getattr(args, "match_label", False):
+        return {}
+    pos = getattr(args, "match_label_pos", None) or DEFAULT_LABEL_POS
+    return {"labels": chapter_titles(count), "label_pos": tuple(pos)}
+
+
 def write_chapter_timestamps(
     pairs: List[Tuple[int, int]],
     output_path: str,
@@ -322,7 +367,7 @@ def write_chapter_timestamps(
     """
     Write a YouTube-compatible chapter timestamps file.
 
-    Each line is "<timestamp> Match <n>", where the timestamp is the
+    Each line is "<timestamp> <title>" (see chapter_titles), where the timestamp is the
     cumulative start time of that clip in the stitched output video.
     The first chapter always starts at 0:00, as required by YouTube.
 
@@ -336,22 +381,65 @@ def write_chapter_timestamps(
     Returns:
         Path to the written .txt file.
     """
+    cumulative = 0
+    lines = []
+    for title, (start, end) in zip(chapter_titles(len(pairs)), pairs):
+        lines.append(f"{_fmt_duration(cumulative)} {title}")
+        cumulative += end - start
+
+    return _write_chapters_file(lines, output_path, chapters_dir)
+
+
+def _write_chapters_file(lines: List[str], output_path: str, chapters_dir: str | None) -> str:
+    """Write chapter lines to <output basename>_chapters.txt; return its path."""
     base_name = os.path.splitext(os.path.basename(output_path))[0] + "_chapters.txt"
     if chapters_dir:
         os.makedirs(chapters_dir, exist_ok=True)
         txt_path = os.path.join(chapters_dir, base_name)
     else:
         txt_path = os.path.join(os.path.dirname(output_path), base_name)
-    cumulative = 0
-    lines = []
-    for i, (start, end) in enumerate(pairs, start=1):
-        lines.append(f"{_fmt_duration(cumulative)} Match {i}")
-        cumulative += end - start
-
     with open(txt_path, "w") as f:
         f.write("\n".join(lines) + "\n")
-
     return txt_path
+
+
+# YouTube ignores chapters shorter than this, so gaps below it are folded
+# into the neighbouring chapter instead of getting their own marker.
+_MIN_CHAPTER_SEC = 10
+
+
+def raw_chapter_lines(pairs: List[Tuple[int, int]], duration: int) -> List[str]:
+    """
+    Chapter lines for raw mode, where the uncut source video is uploaded.
+
+    Timestamps are positions in the source video. Each match gets a
+    "Match N" chapter at its start; downtime gets "Pre-match", "Break" or
+    "Post-match" chapters when it's at least _MIN_CHAPTER_SEC long. The
+    first chapter always starts at 0:00, as required by YouTube.
+    """
+    chapters: List[Tuple[int, str]] = []
+    titles = chapter_titles(len(pairs))
+    for i, (title, (start, end)) in enumerate(zip(titles, pairs)):
+        if i == 0:
+            if start >= _MIN_CHAPTER_SEC:
+                chapters.append((0, "Pre-match"))
+            else:
+                start = 0
+        chapters.append((start, title))
+        next_start = pairs[i + 1][0] if i + 1 < len(pairs) else duration
+        if next_start - end >= _MIN_CHAPTER_SEC:
+            chapters.append((end, "Break" if i + 1 < len(pairs) else "Post-match"))
+    return [f"{_fmt_duration(t)} {title}" for t, title in chapters]
+
+
+def write_raw_chapter_timestamps(
+    pairs: List[Tuple[int, int]],
+    duration: int,
+    output_path: str,
+    chapters_dir: str | None = None,
+) -> str:
+    """Write raw-mode chapters (see raw_chapter_lines); return the .txt path."""
+    return _write_chapters_file(raw_chapter_lines(pairs, duration), output_path, chapters_dir)
 
 
 def _progress_bar(current: int, total: int, elapsed: float, width: int = 30) -> str:
@@ -415,6 +503,59 @@ def _maybe_upload(
         notify(f"YouTube upload failed: {msg}")
         print(f"YouTube upload failed: {msg}", file=sys.stderr)
         return None
+
+
+def _produce_output(args, pairs, duration: int, output_dir: str, notify, first_step: int):
+    """
+    Turn detected (start, end) pairs into the final output: cut + stitch
+    clips and write stitched-video chapters, or in raw mode just write
+    source-video chapters. Uploads if enabled. Returns
+    (chapters_text, youtube_url).
+    """
+    final_output = output_video_path(args, output_dir)
+    chapters_dir = getattr(args, "chapters_dir", None)
+
+    if getattr(args, "raw_mode", False):
+        print(f"\n[{first_step}/4] Raw mode: skipping clip extraction")
+        if getattr(args, "match_label", False):
+            print("  [info] Match label is ignored in raw mode (the video is not re-encoded)")
+        chapters_path = write_raw_chapter_timestamps(pairs, duration, final_output, chapters_dir)
+        upload_path = args.video
+        print(f"\nDone! Source video (uncut): {upload_path}")
+    else:
+        _check_cancel(args)
+        notify(f"Extracting {len(pairs)} clip(s)...")
+        print(f"\n[{first_step}/4] Extracting {len(pairs)} clip(s)...")
+        try:
+            clip_paths = create_clips(
+                args.video, pairs, output_dir,
+                cancel_event=getattr(args, "cancel_event", None),
+                status_callback=notify,
+                **_label_kwargs(args, len(pairs)),
+            )
+
+            _check_cancel(args)
+            notify("Stitching clips...")
+            print(f"\n[{first_step + 1}/4] Stitching clips into {final_output}...")
+            stitch_clips(clip_paths, final_output, cancel_event=getattr(args, "cancel_event", None))
+        except RuntimeError as e:
+            if str(e) == "__cancelled__":
+                raise CancelledError("Cancelled by user")
+            raise
+
+        for clip in clip_paths:
+            os.remove(clip)
+
+        chapters_path = write_chapter_timestamps(pairs, final_output, chapters_dir)
+        upload_path = final_output
+        print(f"\nDone! Final video: {final_output}")
+
+    print(f"Chapter timestamps:  {chapters_path}")
+    with open(chapters_path) as _f:
+        chapters_text = _f.read()
+
+    youtube_url = _maybe_upload(args, upload_path, chapters_text, notify)
+    return chapters_text, youtube_url
 
 
 def run(args) -> None:
@@ -515,38 +656,7 @@ def run(args) -> None:
             print("\nNo CD→WF pairs found. Nothing to clip.", file=sys.stderr)
             sys.exit(0)
 
-        _check_cancel(args)
-        _notify(f"Extracting {len(pairs)} clip(s)...")
-        print(f"\n[2/4] Extracting {len(pairs)} clip(s)...")
-        try:
-            clip_paths = create_clips(
-                args.video, pairs, output_dir,
-                cancel_event=getattr(args, "cancel_event", None),
-                status_callback=_notify,
-            )
-
-            final_output = output_video_path(args, output_dir)
-            _check_cancel(args)
-            _notify("Stitching clips...")
-            print(f"\n[3/4] Stitching clips into {final_output}...")
-            stitch_clips(clip_paths, final_output, cancel_event=getattr(args, "cancel_event", None))
-        except RuntimeError as e:
-            if str(e) == "__cancelled__":
-                raise CancelledError("Cancelled by user")
-            raise
-
-        for clip in clip_paths:
-            os.remove(clip)
-
-        chapters_path = write_chapter_timestamps(pairs, final_output, getattr(args, "chapters_dir", None))
-
-        print(f"\nDone! Final video: {final_output}")
-        print(f"Chapter timestamps:  {chapters_path}")
-        with open(chapters_path) as _f:
-            chapters_text = _f.read()
-
-        youtube_url = _maybe_upload(args, final_output, chapters_text, _notify)
-        return chapters_text, youtube_url
+        return _produce_output(args, pairs, duration, output_dir, _notify, first_step=2)
 
     # --- OCR mode ---
     x1, y1, x2, y2 = args.chat_region
@@ -668,40 +778,8 @@ def run(args) -> None:
         print("\nNo CD→WF pairs found. Nothing to clip.", file=sys.stderr)
         sys.exit(0)
 
-    # Step 4: Extract clips
-    _check_cancel(args)
-    _notify(f"Extracting {len(pairs)} clip(s)...")
-    print(f"\n[3/4] Extracting {len(pairs)} clip(s)...")
-    try:
-        clip_paths = create_clips(
-            args.video, pairs, output_dir,
-            cancel_event=getattr(args, "cancel_event", None),
-            status_callback=_notify,
-        )
-
-        # Step 5: Stitch clips
-        _check_cancel(args)
-        final_output = output_video_path(args, output_dir)
-        _notify("Stitching clips...")
-        print(f"\n[4/4] Stitching clips into {final_output}...")
-        stitch_clips(clip_paths, final_output, cancel_event=getattr(args, "cancel_event", None))
-    except RuntimeError as e:
-        if str(e) == "__cancelled__":
-            raise CancelledError("Cancelled by user")
-        raise
-
-    for clip in clip_paths:
-        os.remove(clip)
-
-    chapters_path = write_chapter_timestamps(pairs, final_output)
-
-    print(f"\nDone! Final video: {final_output}")
-    print(f"Chapter timestamps:  {chapters_path}")
-    with open(chapters_path) as _f:
-        chapters_text = _f.read()
-
-    youtube_url = _maybe_upload(args, final_output, chapters_text, _notify)
-    return chapters_text, youtube_url
+    # Steps 4 & 5: Extract and stitch clips (or raw-mode chapters only)
+    return _produce_output(args, pairs, duration, output_dir, _notify, first_step=3)
 
 
 def main():
