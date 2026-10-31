@@ -1,6 +1,10 @@
 """
 chat_log_parser.py - Parse EVE Online local-chat log files to find CD/WF commands.
 
+End markers are WF or GF.  A bare time-up call ("time", "time's up",
+"timeout") also ends a round, but only when no WF/GF follows it before the
+next round starts.
+
 EVE exports chat logs as UTF-16 LE files.  Each message line has the form:
     [ YYYY.MM.DD HH:MM:SS ] PlayerName > message text
 
@@ -27,6 +31,15 @@ _LOG_LINE_RE = re.compile(
 
 _FIRST_WORD_CD = re.compile(r'^\s*CD\b', re.IGNORECASE)
 _FIRST_WORD_WF = re.compile(r'^\s*WF\b', re.IGNORECASE)
+
+# A round that goes to the time limit often has no WF/GF; the only end signal
+# is someone calling "time".  Match the whole message only, so chat like
+# "time to go" or "4.5 mins left" is not treated as an end marker.
+# People often type "time" a few seconds before "gf"/"wf", so parse_chat_logs
+# only uses a time-up call when no WF/GF follows it before the next round.
+_TIME_UP_RE = re.compile(
+    r"^[^a-z0-9]*(time|time'?s up|time ?out)[^a-z0-9]*$", re.IGNORECASE
+)
 
 # --- Bare-countdown detection -------------------------------------------
 # Some callers skip the "CD" announcement and go straight to counting down
@@ -156,6 +169,11 @@ def parse_chat_logs(
     """
     Extract CD and WF video timestamps from EVE chat log files.
 
+    WF timestamps include GF.  They also include a bare time-up call
+    ("time", "time's up", "timeout") when no WF/GF follows it before the next
+    CD, so a round that ends on the time limit is still clipped.  Only the
+    first time-up call of a round is used.
+
     Args:
         log_paths: Paths to one or more EVE chat log files (any order; will be
             merged and sorted chronologically).
@@ -189,6 +207,8 @@ def parse_chat_logs(
     cd_timestamps: List[int] = []
     wf_timestamps: List[int] = []
     explicit_cd_ts: List[datetime] = []
+    explicit_wf_ts: List[datetime] = []
+    time_up_ts: List[datetime] = []
 
     for ts, player, msg in sorted_entries:
         if tournament_mode:
@@ -211,11 +231,16 @@ def parse_chat_logs(
                     break
             is_cd = first in ('CD', 'COUNTDOWN')
             is_wf = first in ('WF', 'GF')
+            if _TIME_UP_RE.match(msg.strip()):
+                time_up_ts.append(ts)
+                continue
         if not is_cd and not is_wf:
             continue
 
         if is_cd:
             explicit_cd_ts.append(ts)
+        else:
+            explicit_wf_ts.append(ts)
 
         video_sec = _to_video_seconds(ts, t0_game_seconds, video_duration)
         if video_sec is None:
@@ -226,8 +251,29 @@ def parse_chat_logs(
         else:
             wf_timestamps.append(video_sec)
 
+    countdown_starts: List[datetime] = []
     if detect_countdown and not tournament_mode:
-        for start_ts in find_countdown_starts(sorted_entries):
+        countdown_starts = find_countdown_starts(sorted_entries)
+
+    # Use a time-up call as an end marker only when the next event after it is
+    # a round start (or nothing), i.e. the round had no WF/GF of its own.
+    round_starts = sorted(explicit_cd_ts + countdown_starts)
+    last_time_up: Optional[datetime] = None
+    for t in time_up_ts:
+        next_wf = next((w for w in explicit_wf_ts if w >= t), None)
+        next_cd = next((c for c in round_starts if c > t), None)
+        if next_wf is not None and (next_cd is None or next_wf < next_cd):
+            continue  # a real WF/GF ends this round
+        if last_time_up is not None and not any(last_time_up < c < t for c in round_starts):
+            continue  # already have a time-up call for this round
+        last_time_up = t
+        video_sec = _to_video_seconds(t, t0_game_seconds, video_duration)
+        if video_sec is not None:
+            wf_timestamps.append(video_sec)
+    wf_timestamps.sort()
+
+    if detect_countdown and not tournament_mode:
+        for start_ts in countdown_starts:
             # Skip a synthetic CD if an explicit CD/COUNTDOWN was already
             # typed near it — the round already has a real start marker.
             if any(abs((start_ts - cd_ts).total_seconds()) <= _COUNTDOWN_CD_DEDUPE

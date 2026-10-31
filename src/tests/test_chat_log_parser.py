@@ -473,3 +473,122 @@ class TestParseChatLogsCountdownIntegration:
             assert cd_times[0] == 31 * 60 + 20  # the explicit CD wins
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Time-up end marker
+# ---------------------------------------------------------------------------
+# A round that goes to the time limit often has no WF/GF; the only end signal
+# is someone typing "time".  Without it the round's CD is orphaned and the
+# match is silently dropped (seen 2026-10-30: 8 matches played, 7 clipped).
+
+class TestTimeUpEndMarker:
+    def _make_log(self, messages):
+        """messages: list of (HH:MM:SS, player, text)"""
+        lines = ["﻿\n Session started: 2026.10.30 13:00:00\n"]
+        for ts, player, msg in messages:
+            lines.append(f"﻿[ 2026.10.30 {ts} ] {player} > {msg}")
+        return _write_log("\n".join(lines))
+
+    def _end_markers(self, msg):
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("14:09:23", "Stalence", msg),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            _, wf_times = parse_chat_logs([path], t0, 7200)
+            return wf_times
+        finally:
+            os.unlink(path)
+
+    def test_time_detected(self):
+        assert self._end_markers("time") == [69 * 60 + 23]
+
+    def test_variants_detected(self):
+        for msg in ("TIME", "time's up", "times up", "timeout", "time out", "time!"):
+            assert self._end_markers(msg) == [69 * 60 + 23], msg
+
+    def test_time_in_sentence_not_detected(self):
+        for msg in ("time to go", "4.5 mins left", "ok time", "timer?"):
+            assert self._end_markers(msg) == [], msg
+
+    def test_time_before_gf_ignored(self):
+        # "time" a few seconds before "gf" must not end the clip early
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("14:09:23", "Stalence", "time"),
+            ("14:09:26", "Stalence", "gf"),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            _, wf_times = parse_chat_logs([path], t0, 7200)
+            assert wf_times == [69 * 60 + 26]
+        finally:
+            os.unlink(path)
+
+    def test_time_same_second_as_gf_ignored(self):
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("14:09:23", "Stalence", "time!"),
+            ("14:09:23", "Stalence", "gf"),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            _, wf_times = parse_chat_logs([path], t0, 7200)
+            assert wf_times == [69 * 60 + 23]
+        finally:
+            os.unlink(path)
+
+    def test_repeated_time_calls_count_once(self):
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("14:09:23", "Stalence", "time"),
+            ("14:09:24", "Daed Alas", "time"),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            _, wf_times = parse_chat_logs([path], t0, 7200)
+            assert wf_times == [69 * 60 + 23]
+        finally:
+            os.unlink(path)
+
+    def test_time_before_bare_countdown_round_kept(self):
+        # Next round starts with a bare countdown (no "CD"), then "wf".
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("14:09:23", "Stalence", "time"),
+        ] + [(f"14:20:{25 + i:02d}", "Daed Alas", str(10 - i)) for i in range(11)] + [
+            ("14:25:10", "Rima Ambraelle", "wf"),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            _, wf_times = parse_chat_logs([path], t0, 7200)
+            assert wf_times == [69 * 60 + 23, 85 * 60 + 10]
+        finally:
+            os.unlink(path)
+
+    def test_timed_out_round_paired(self):
+        from chat_analyzer import pair_cd_wf
+        path = self._make_log([
+            ("13:59:06", "Daed Alas", "CD"),
+            ("13:59:08", "Daed Alas", "10"),
+            ("13:59:09", "Daed Alas", "9"),
+            ("13:59:10", "Daed Alas", "8"),
+            ("13:59:11", "Daed Alas", "7"),
+            ("14:04:52", "Stalence", "4.5 mins left"),
+            ("14:09:20", "Daed Alas", "0"),
+            ("14:09:23", "Stalence", "time"),
+            ("14:20:23", "Daed Alas", "CD"),
+            ("14:25:10", "Rima Ambraelle", "wf"),
+        ])
+        t0 = game_time_to_seconds("13:00:00")
+        try:
+            cd_times, wf_times = parse_chat_logs([path], t0, 7200)
+            pairs = pair_cd_wf(cd_times, wf_times)
+            assert pairs == [
+                (59 * 60 + 6, 69 * 60 + 23),
+                (80 * 60 + 23, 85 * 60 + 10),
+            ]
+        finally:
+            os.unlink(path)

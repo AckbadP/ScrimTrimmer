@@ -15,7 +15,7 @@ You should double check your Youtube account's default video upload configuratio
 1. **Frame extraction** — samples one frame per second from the input video via OpenCV
 2. **OCR** — runs pytesseract on the bottom-left chat region of each frame
 3. **Chat analysis** — detects new `CD`/`WF`/`GF` occurrences using a monotonic-count strategy (robust to OCR noise and missed frames); only matches keywords that appear *after* the `>` separator to avoid false positives from player names
-4. **Pairing** — for each `WF`, finds the most recent preceding `CD` and records the `(CD_time, WF_time)` boundary
+4. **Pairing** — for each `WF`, finds the most recent preceding `CD` and records the `(CD_time, WF_time)` boundary. In chat log mode, a message that is just `time` (or `time's up` / `timeout`) also ends a round when no `WF`/`GF` follows it before the next `CD`, so rounds that go to the time limit are still clipped
 5. **Clipping** — ffmpeg stream-copies each segment (no re-encode)
 6. **Stitching** — ffmpeg concatenates all clips into `final_output.mp4`
 
